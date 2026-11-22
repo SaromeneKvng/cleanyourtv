@@ -15,6 +15,8 @@ android {
         targetSdk 34
         versionCode 15
         versionName '3.6'
+        // Personal fork: the Rive runtime is native code, built here only for 32-bit ARM, which this TV runs.
+        ndk { abiFilters 'armeabi-v7a' }
     }
 
     buildTypes {
@@ -42,9 +44,27 @@ android {
     }
 }
 
+// Personal fork: Rive asks for androidx.core 1.17 (compileSdk 36, AGP 8.9). The launcher builds against SDK 34 with
+// AGP 8.5, so pin core to the last release that does; Rive's view code uses nothing newer from it.
+configurations.all {
+    resolutionStrategy {
+        force 'androidx.core:core:1.13.1'
+        force 'androidx.core:core-ktx:1.13.1'
+    }
+}
+
 dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
     implementation 'androidx.dynamicanimation:dynamicanimation:1.0.0'
+    // Personal fork: plays the Home effects .riv (petals, bloom, clock) built with the Rive CLI (rive_home).
+    // Only the classic RiveAnimationView is used, so its Jetpack Compose wrapper (and the newer SDK it needs) stays out.
+    implementation('app.rive:rive-android:11.16.0') {
+        exclude group: 'androidx.compose.ui'
+        exclude group: 'androidx.compose.runtime'
+        exclude group: 'androidx.compose.foundation'
+        exclude group: 'androidx.compose'
+        exclude group: 'androidx.lifecycle', module: 'lifecycle-runtime-compose'
+    }
     // Test only (never in the APK): plain JVM tests for the module card validators, src/test.
     testImplementation 'junit:junit:4.13.2'
 }

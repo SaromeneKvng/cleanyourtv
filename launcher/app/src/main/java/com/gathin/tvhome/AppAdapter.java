@@ -218,6 +218,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     private final Map<String, String> appLabels, appBanners;
     /** Every app tile is its icon on a card tinted from that icon, never its banner (config.xml, uniform_tiles). */
     private final boolean uniformTiles;
+    /** Rows of large names instead of tiles (list_layout), with or without the app's icon (list_icons). */
+    private final boolean listLayout, listIcons;
+    /** Alpha of a list row's name while it is not focused. */
+    static final float LIST_REST_ALPHA = 0.42f;
     /** Packages drawn from their icon and name even when they have a banner (config.xml icon_tiles). */
     private final Set<String> iconTiles;
     private final List<Entry> items = new ArrayList<>();
@@ -248,6 +252,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.appLabels = cfg.appLabels;
         this.appBanners = cfg.appBanners;
         this.uniformTiles = cfg.uniformTiles;
+        this.listLayout = cfg.listLayout;
+        this.listIcons = cfg.listIcons;
         // Tiles keep their identity across reload(), so a focused tile stays on its app instead of
         // its view being rebound to whatever app now sits in that slot.
         setHasStableIds(true);
@@ -298,7 +304,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             if (!seen.add(pkg + '\n' + label)) continue;
             Drawable banner = null;
             // uniform_tiles draws the icon, so an app's banner is never loaded. A module card keeps its banner.
-            if (!(uniformTiles && card == null)) {
+            if (!((uniformTiles || listLayout) && card == null)) {
                 banner = bundledBanner(appBanners.get(pkg));
                 if (banner == null) banner = iconTiles.contains(pkg) ? iconBanner(ri.loadIcon(pm)) : loadBanner(pm, ri);
             }
@@ -411,6 +417,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             });
             return new RecyclerView.ViewHolder(row) { };
         }
+        if (listLayout) {
+            View row = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_list, parent, false);
+            return new Holder(row, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot, true);
+        }
         View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_app, parent, false);
         float density = parent.getResources().getDisplayMetrics().density;
         int width = parent.getWidth() > 0 ? parent.getWidth() : parent.getMeasuredWidth();
@@ -452,7 +462,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             View label = v.findViewById(R.id.label);
             label.setPadding(label.getPaddingLeft(), label.getPaddingTop(), label.getPaddingRight(), Math.round(4f * density));
         }
-        return new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot);
+        return new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot, false);
     }
 
     @Override
@@ -524,7 +534,30 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             }
             return true;
         });
+        if (listLayout) bindListRow(h, e);
     }
+
+    /** list_layout: the name in large type, the icon (or none) before it, dimmed unless focused. */
+    private void bindListRow(Holder h, Entry e) {
+        boolean focused = h.card.isFocused();
+        h.card.setBackground(null);
+        h.card.setScaleX(focused && animations ? LIST_FOCUS_SCALE : 1f);
+        h.card.setScaleY(focused && animations ? LIST_FOCUS_SCALE : 1f);
+        h.card.setTranslationY(0f);
+        h.card.setTranslationZ(0f);
+        h.banner.setImageDrawable(null);
+        h.banner.setVisibility(View.GONE);
+        h.name.setVisibility(View.GONE);
+        h.icon.setImageDrawable(listIcons ? e.icon : null);
+        h.icon.setVisibility(listIcons ? View.VISIBLE : View.GONE);
+        h.label.setText(e.name);
+        h.label.setVisibility(View.VISIBLE);
+        h.label.setAlpha(focused ? 1f : LIST_REST_ALPHA);
+        h.icon.setAlpha(focused ? 1f : LIST_REST_ALPHA);
+    }
+
+    /** How much a focused list row grows, from its left edge. */
+    static final float LIST_FOCUS_SCALE = 1.06f;
 
     /** Opens the tile's activity by explicit component, with no extras: a card can name nothing else. */
     @SuppressWarnings("deprecation")
@@ -916,10 +949,13 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         final boolean overshoot;
         /** A dock tile: it grows in place without advanced_effects' lift, which reads as off-centre in the band (#2135). */
         boolean inDock;
+        /** A list_layout row (item_list.xml) rather than a tile. */
+        final boolean listRow;
 
         Holder(View v, TileListener listener, boolean animations, boolean advancedEffects,
-               boolean reducedMotion, float restNameAlpha, boolean overshoot) {
+               boolean reducedMotion, float restNameAlpha, boolean overshoot, boolean listRow) {
             super(v);
+            this.listRow = listRow;
             card = v.findViewById(R.id.card);
             cardBackground = card.getBackground();
             banner = v.findViewById(R.id.banner);
@@ -933,6 +969,39 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             this.overshoot = overshoot;
 
             final float density = v.getResources().getDisplayMetrics().density;
+            if (listRow) {
+                // Grow from the left edge, so the name stays on the list's line instead of drifting left.
+                card.setPivotX(0f);
+                card.addOnLayoutChangeListener((view, l, t, r, b, ol, ot, or, ob) -> view.setPivotY((b - t) / 2f));
+                card.setOnKeyListener((view, keyCode, event) -> {
+                    if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN
+                            && keyCode != KeyEvent.KEYCODE_DPAD_LEFT && keyCode != KeyEvent.KEYCODE_DPAD_RIGHT) return false;
+                    int pos = getBindingAdapterPosition();
+                    return listener != null && pos != RecyclerView.NO_POSITION && listener.onTileVerticalKey(pos, keyCode);
+                });
+                card.setOnFocusChangeListener((view, focused) -> {
+                    view.animate().cancel();
+                    label.animate().cancel();
+                    icon.animate().cancel();
+                    float s = focused && animations ? LIST_FOCUS_SCALE : 1f;
+                    float a = focused ? 1f : LIST_REST_ALPHA;
+                    if (!animations || reducedMotion) {
+                        view.setScaleX(s);
+                        view.setScaleY(s);
+                        label.setAlpha(a);
+                        icon.setAlpha(a);
+                    } else {
+                        view.animate().scaleX(s).scaleY(s).setDuration(focused ? 200 : 160)
+                                .setInterpolator(new DecelerateInterpolator(1.5f)).start();
+                        label.animate().alpha(a).setDuration(180).start();
+                        icon.animate().alpha(a).setDuration(180).start();
+                    }
+                    int pos = getBindingAdapterPosition();
+                    if (focused && listener != null && pos != RecyclerView.NO_POSITION) listener.onTileFocused(pos, view);
+                });
+                return;
+            }
             card.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, Outline outline) {

@@ -110,6 +110,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     static final String ACTION_VIEW_INPUTS = "com.android.tv.action.VIEW_INPUTS";
     /** Tiles per row and dock slots (res/values/config.xml, columns). Set in onCreate. */
     static int COLUMNS = 4;
+    /** list_layout: Home is one column of large names on the left (Config.listLayout). */
+    private boolean listLayout;
+    /** rive_home: the Rive-drawn drifting petals; null when off or when Rive cannot run here. */
+    private RiveHome riveHome;
+    /** Height of the fade the list's last names run into at the bottom of the screen. */
+    private static final float LIST_FADE_DP = 120f;
     private boolean rtlAppGrid;
     private static final long MINUTE_MS = 60_000L;
     private static final long STATS_MS = 10_000L;
@@ -184,6 +190,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private TextView greeting;
     private View clockBlock;
     private View btnInputs;
+    /** show_search_button: opens the TV's own search (Google search on Android TV). Hidden unless a theme asks. */
+    private TextView btnSearch;
     /** config show_inputs_pill: false keeps the Inputs pill hidden even when the TV has inputs. */
     private boolean showInputsPill = true;
     private TextView btnWifi;
@@ -482,6 +490,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         reducedMotion = cfg.reducedMotion;
         dockRow = cfg.dockRow;
         singleRow = cfg.singleRow;
+        listLayout = cfg.listLayout;
         focusOvershoot = cfg.focusOvershoot;
         festival = cfg.festival;
         festive = festival.active(LocalDate.now());
@@ -654,6 +663,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     else parent.smoothScrollBy(dx, 0);
                     return true;
                 }
+                if (listLayout) {
+                    // Keep the focused name between the list's top line and the faded band at the bottom.
+                    int top = child.getTop() + rect.top;
+                    int bottom = top + rect.height();
+                    int limitTop = getPaddingTop();
+                    int limitBottom = getHeight() - getPaddingBottom() - (int) (LIST_FADE_DP * 0.4f * density);
+                    // Whole rows at a time, so the names stay on the same lines and none is left half under the clock.
+                    int rowH = Math.max(1, child.getHeight());
+                    int dy = top < limitTop ? -(int) Math.ceil((limitTop - top) / (float) rowH) * rowH
+                            : bottom > limitBottom ? (int) Math.ceil((bottom - limitBottom) / (float) rowH) * rowH : 0;
+                    if (dy == 0) return false;
+                    if (immediate || reducedMotion || !animations) parent.scrollBy(0, dy);
+                    else parent.smoothScrollBy(0, dy);
+                    return true;
+                }
                 if (dockRow && getPosition(child) < COLUMNS) return false;
                 int top = child.getTop() + rect.top;
                 int bottom = top + rect.height();
@@ -682,6 +706,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             @Override
             public void onChildViewAttachedToWindow(@NonNull View v) {
                 v.setAlpha(tileAlpha(grid.getChildAdapterPosition(v)));
+                if (listLayout) grid.post(MainActivity.this::fadeListRows);
             }
 
             @Override
@@ -690,7 +715,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         });
         if (dockRow) grid.addItemDecoration(new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
                 singleRow, cfg.dockBandAll));
-        if (cfg.fadeRows) TopFade.attach(grid, 48 * density);
+        if (cfg.fadeRows && !listLayout) TopFade.attach(grid, 48 * density);
+        if (cfg.riveHome) {
+            riveHome = RiveHome.attach(this, root);
+        }
+        if (listLayout) {
+            // The last names on screen fade out, as if the list ran on below the picture.
+            // Clipped to the padding, so names scrolled past the list's top line leave instead of covering the clock.
+            grid.setClipToPadding(true);
+            grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
+                @Override
+                public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                    fadeListRows();
+                }
+            });
+            grid.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> grid.post(this::fadeListRows));
+            glass.setVisibility(View.GONE);
+        }
         // Reduced motion: the tiles are simply there, with no entrance (reloadApps skips it there too).
         if (animations && !reducedMotion) {
             grid.setLayoutAnimation(new LayoutAnimationController(
@@ -708,6 +749,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         int rowsBelowDock = cfg.rowsBelowDock;
         grid.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             int h = b - t;
+            if (listLayout) {
+                // The list starts a fifth of the way down and keeps to the left 58% of the screen, leaving the
+                // picture clear on the right.
+                int top = (int) (h * 0.12f);
+                int right = (int) ((r - l) * 0.42f);
+                // Names line up with the clock above them: the grid's parent already insets it by the header's margin.
+                int left = 0;
+                if (grid.getPaddingTop() != top || grid.getPaddingRight() != right || grid.getPaddingLeft() != left) {
+                    grid.setPadding(left, top, right, grid.getPaddingBottom());
+                }
+                return;
+            }
             // Item height follows the tile size, which follows the columns and the rows that must fit (AppAdapter.tileWidthPx).
             int inner = (r - l) - grid.getPaddingLeft() - grid.getPaddingRight();
             int tileW = AppAdapter.tileWidthPx(inner, h, COLUMNS, rowsBelowDock, cfg.dockTitle, cfg.dockRow, density);
@@ -822,7 +875,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         btnInputs = findViewById(R.id.btnInputs);
         View btnSettings = findViewById(R.id.btnSettings);
         btnInputs.setOnClickListener(v -> showInputs());
-        btnWifi.setOnClickListener(v -> openNetworkPill());
+        btnWifi.setOnClickListener(v -> {
+            if (cfg.wifiMenu) showWifi();
+            else openNetworkPill();
+        });
         btnVpn.setOnClickListener(v -> openVpnPill());
         btnWifi.setOnLongClickListener(v -> {
             open(systemIntent(Settings.ACTION_WIFI_SETTINGS));
@@ -886,6 +942,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             makeIconOnly((TextView) btnSettings);
         }
         if (cfg.iconOnlyInputs) makeIconOnly((TextView) btnInputs);
+        btnSearch = findViewById(R.id.btnSearch);
+        if (cfg.showSearchButton && !cfg.topMenu) {
+            btnSearch.setVisibility(View.VISIBLE);
+            if (iconOnlyButtons || cfg.iconOnlyInputs) makeIconOnly(btnSearch);
+            btnSearch.setOnClickListener(v -> openSearch());
+        }
         iconOnlyVpn = vpnPill && cfg.iconOnlyVpn;
         if (iconOnlyVpn) {
             vpnPlainBackground = btnVpn.getBackground().getConstantState();
@@ -908,12 +970,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
                 return true;
             }
-            int firstButton = btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
+            int firstButton = btnSearch.getVisibility() == View.VISIBLE ? R.id.btnSearch
+                    : btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
             int leftButton = rtlMenuBar ? R.id.btnSettings : firstButton;
             int rightButton = rtlMenuBar ? firstButton : R.id.btnSettings;
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return v.getId() == leftButton;
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == rightButton;
         };
+        btnSearch.setOnKeyListener(pillKeys);
         btnInputs.setOnKeyListener(pillKeys);
         btnWifi.setOnKeyListener(pillKeys);
         btnVpn.setOnKeyListener(pillKeys);
@@ -1085,6 +1149,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         updateClockVisibility();
         clockRefresh.start();   // with timeReceiver: while Home is visible, paused or not
         tileRefresh.onStart();
+        if (riveHome != null) riveHome.start();
     }
 
     @Override
@@ -1341,6 +1406,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         handler.removeCallbacks(clockCheck);
         stopped = true;
         tileRefresh.onStop();
+        if (riveHome != null) riveHome.stop();
     }
 
     /**
@@ -1663,6 +1729,25 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** A tile's alpha: the carried tile stays bright; every other tile is dim while reordering, including after a
      * drop, until Back ends the mode. In edit-dock mode, dock tiles other than the chosen place are dimmed. */
+    /**
+     * list_layout: rows fade out over the last LIST_FADE_DP above the list's bottom edge, by where their middle sits.
+     * Done per row rather than with a fading edge, which draws nothing over a see-through grid on some firmware.
+     */
+    private void fadeListRows() {
+        if (!listLayout || grid == null) return;
+        float fade = LIST_FADE_DP * density;
+        float bottom = grid.getHeight() - grid.getPaddingBottom();
+        float top = grid.getPaddingTop();
+        for (int i = 0; i < grid.getChildCount(); i++) {
+            View child = grid.getChildAt(i);
+            float mid = child.getY() + child.getHeight() / 2f;
+            // At the top, a row fades only as it slides up past the list's first line: by how much of it is above.
+            float topF = child.getHeight() == 0 ? 1f : 1f + (child.getY() - top) / child.getHeight();
+            float f = Math.max(0f, Math.min(1f, Math.min((bottom - mid) / fade, topF)));
+            child.setAlpha(f * tileAlpha(grid.getChildAdapterPosition(child)));
+        }
+    }
+
     private float tileAlpha(int pos) {
         if (movingKey != null) {
             return pos != RecyclerView.NO_POSITION && movingKey.equals(adapter.keyAt(pos)) ? 1f : 0.45f;
@@ -1818,6 +1903,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     public void onTileFocused(int position, View card) {
         lastFocused = position;
         lastFocusedKey = adapter.keyAt(position);
+        wallpaperPlayer.showFor(adapter.packageAt(position));
+        if (listLayout) {
+            // No glass and no glow in a list: the row brightens itself (AppAdapter). Only keep it on screen.
+            View item = (View) card.getParent();
+            revealRect.set(0, 0, item.getWidth(), item.getHeight());
+            grid.requestChildRectangleOnScreen(item, revealRect, reducedMotion);
+            return;
+        }
         // Focus restored before the first layout (cold start): the tile has no size yet, and the glass
         // would be sized to 2*pad. Run again once the tile is laid out.
         if (card.getWidth() == 0) {
@@ -3151,9 +3244,125 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * The network pill opens the VPN app when one is configured and installed, otherwise Wi-Fi settings. With
      * vpn_pill the VPN app has its own pill, so this one always opens Wi-Fi settings.
      */
+    /**
+     * The TV's search screen: global search (Google search on Android TV, with voice and the on-screen keyboard), else
+     * the assistant, else a short "not available" toast.
+     */
+    private void openSearch() {
+        Intent search = new Intent("android.search.action.GLOBAL_SEARCH");
+        if (getPackageManager().resolveActivity(search, 0) == null) search = new Intent(Intent.ACTION_ASSIST);
+        open(search);
+    }
+
     private void openNetworkPill() {
         Intent i = vpnPill ? null : vpnAppIntent();
         open(i != null ? i : systemIntent(Settings.ACTION_WIFI_SETTINGS));
+    }
+
+    /**
+     * Personal fork: the Wi-Fi pill's glass dropdown, like the Inputs list. The connected network first, then nearby
+     * ones by signal strength; a saved network switches at once, an unsaved one opens the system screen for its
+     * password, and the last row is the full Wi-Fi settings. On Ethernet, or with a VPN app set, the pill keeps its
+     * old behaviour.
+     */
+    @SuppressWarnings("deprecation")
+    private void showWifi() {
+        android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
+                getApplicationContext().getSystemService(WIFI_SERVICE);
+        if (wm == null || vpnAppIntent() != null && !vpnPill) {
+            openNetworkPill();
+            return;
+        }
+        View anchor = btnWifi;
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        int width = Math.max(anchor.getWidth(), (int) (240 * density));
+        final PopupWindow popup = glassPopup(panel, width);
+
+        if (!wm.isWifiEnabled()) {
+            addWifiRow(rows, popup, getString(R.string.wifi_turn_on), null, false, () -> wm.setWifiEnabled(true));
+        } else {
+            android.net.wifi.WifiInfo info = wm.getConnectionInfo();
+            String current = info == null ? "" : unquote(info.getSSID());
+            Map<String, Integer> saved = new HashMap<>();
+            List<android.net.wifi.WifiConfiguration> configs = null;
+            try {
+                configs = wm.getConfiguredNetworks();
+            } catch (SecurityException ignored) {
+            }
+            if (configs != null) for (android.net.wifi.WifiConfiguration c : configs) saved.put(unquote(c.SSID), c.networkId);
+            // Strongest signal per name, connected network first; hidden networks (no name) are left out.
+            Map<String, Integer> best = new HashMap<>();
+            // Needs ACCESS_FINE_LOCATION, which build-and-install grants; without it the list is just the saved networks.
+            List<android.net.wifi.ScanResult> scan = Collections.emptyList();
+            if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                try {
+                    scan = wm.getScanResults();
+                } catch (SecurityException ignored) {
+                }
+            }
+            for (android.net.wifi.ScanResult r : scan) {
+                if (r.SSID == null || r.SSID.isEmpty()) continue;
+                Integer had = best.get(r.SSID);
+                if (had == null || r.level > had) best.put(r.SSID, r.level);
+            }
+            if (!current.isEmpty() && !"<unknown ssid>".equals(current)) best.put(current, Integer.MAX_VALUE);
+            // No scan results (location off, or no scan yet): the saved networks stand in for nearby ones.
+            if (best.size() <= 1) for (String name : saved.keySet()) if (!best.containsKey(name)) best.put(name, Integer.MIN_VALUE);
+            List<String> names = new ArrayList<>(best.keySet());
+            Collections.sort(names, (a, b) -> Integer.compare(best.get(b), best.get(a)));
+            int shown = 0;
+            for (String name : names) {
+                if (shown++ == 8) break;
+                boolean connected = name.equals(current);
+                Integer netId = saved.get(name);
+                String status = connected ? getString(R.string.connected) : netId != null ? getString(R.string.wifi_saved) : null;
+                Runnable action;
+                if (connected) action = () -> { };
+                else if (netId != null) action = () -> {
+                    wm.enableNetwork(netId, true);
+                    wm.reconnect();
+                    Toast.makeText(this, getString(R.string.wifi_connecting, name), Toast.LENGTH_SHORT).show();
+                };
+                else action = () -> open(systemIntent(Settings.ACTION_WIFI_SETTINGS));
+                addWifiRow(rows, popup, name, status, connected, action);
+            }
+            if (names.isEmpty()) addWifiRow(rows, popup, getString(R.string.wifi_none_found), null, false,
+                    () -> open(systemIntent(Settings.ACTION_WIFI_SETTINGS)));
+            wm.startScan();   // fresher results for the next time the list opens
+        }
+        addSeparator(rows);
+        View settingsRow = addInputRow(rows, popup, R.drawable.ic_settings, getString(R.string.wifi_settings_row), -1,
+                () -> open(systemIntent(Settings.ACTION_WIFI_SETTINGS)));
+        settingsRow.setTag("settings");
+
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        popup.setWidth(Math.max(width, Math.min(panel.getMeasuredWidth(), (int) (380 * density))));
+        // Wider than the Inputs list, so it hangs from the bar's end (the gear) instead of running off the screen.
+        boolean rtl = getResources().getBoolean(R.bool.rtl_menu_bar);
+        dropIn(popup, panel, findViewById(R.id.btnSettings), rtl ? Gravity.START : Gravity.END);
+        for (int i = 0; i < rows.getChildCount(); i++) {
+            View child = rows.getChildAt(i);
+            if (child.isFocusable()) { child.requestFocus(); break; }
+        }
+    }
+
+    /** A network row in the Wi-Fi dropdown: item_input.xml with the Wi-Fi glyph, a status word and the green dot. */
+    private void addWifiRow(LinearLayout rows, PopupWindow popup, String title, String status, boolean connected,
+                            Runnable action) {
+        View row = addInputRow(rows, popup, R.drawable.ic_wifi, title, -1, action);
+        TextView statusView = row.findViewById(R.id.status);
+        if (status != null) {
+            statusView.setText(status);
+            statusView.setVisibility(View.VISIBLE);
+        }
+        row.findViewById(R.id.dot).setVisibility(connected ? View.VISIBLE : View.GONE);
+    }
+
+    private static String unquote(String ssid) {
+        if (ssid == null) return "";
+        return ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"") ? ssid.substring(1, ssid.length() - 1) : ssid;
     }
 
     /** vpn_app's launch intent, or null when none is set or it is not installed. */

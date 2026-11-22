@@ -334,6 +334,14 @@
                 android:orientation="horizontal">
 
                 <TextView
+                    android:id="@+id/btnSearch"
+                    style="@style/TopButton"
+                    android:text="@string/search_button"
+                    android:drawableStart="@drawable/ic_search"
+                    android:visibility="gone"
+                    android:nextFocusDown="@+id/grid" />
+
+                <TextView
                     android:id="@+id/btnInputs"
                     style="@style/TopButton"
                     android:text="@string/inputs"

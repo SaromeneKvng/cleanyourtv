@@ -61,6 +61,15 @@ final class WallpaperPlayer {
     private final String latitude, longitude;
     private LocalDate sunDay;
     private int[] sun;
+    /** app_wallpapers: a picture per package, cross-faded in while that app has focus; empty when off. */
+    private final Map<String, File> appWallpapers;
+    /** The picture the focused app wants, the one on screen (by path), and whether one is being decoded. */
+    private File wantedFile;
+    private String appShown = "";
+    private boolean appLoading;
+    /** Waits out a burst of D-pad presses, so scrolling the list decodes only where it stops. */
+    private final Runnable loadWanted = this::loadApp;
+    private static final long APP_SETTLE_MS = 220, APP_FADE_MS = 350;
 
     WallpaperPlayer(Context context, FrameLayout root, Config config) {
         this.root = root;
@@ -91,10 +100,11 @@ final class WallpaperPlayer {
         names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
                 ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
         caption = names.isEmpty() ? null : makeCaption(context, root);
-        if (config.wallpaperEnabled && !files.isEmpty()) {
+        appWallpapers = config.appWallpapers;
+        if (config.wallpaperEnabled && (!files.isEmpty() || !appWallpapers.isEmpty())) {
             root.addView(image, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            showFirst();
+            if (!files.isEmpty()) showFirst();
         }
     }
 
@@ -115,6 +125,7 @@ final class WallpaperPlayer {
                 // The picture covers the whole screen: the root's plain colour under it is overdraw.
                 root.setBackground(null);
                 displayed = first.getName();
+                appShown = first.getPath();
                 showCaption(false);
                 if (!displayed.equals(previous)) {
                     preferences.edit().putString("image", displayed)
@@ -145,7 +156,65 @@ final class WallpaperPlayer {
         // let Android reclaim its native buffer after rendering releases it instead of recycling it mid-frame.
         current = null;
         displayed = "";
+        appShown = "";
         root.setBackgroundColor(backgroundColor);
+    }
+
+    /**
+     * app_wallpapers: the focused app's picture, or the theme's own wallpaper for an app without one. Called on
+     * every focus move; the decode starts only once the focus has rested APP_SETTLE_MS on one app.
+     */
+    void showFor(String pkg) {
+        if (appWallpapers.isEmpty() || closed) return;
+        File file = pkg == null ? null : appWallpapers.get(pkg);
+        if (file == null) file = files.isEmpty() ? null : files.get(0);
+        if (file == null) return;
+        wantedFile = file;
+        root.removeCallbacks(loadWanted);
+        root.postDelayed(loadWanted, APP_SETTLE_MS);
+    }
+
+    private void loadApp() {
+        File next = wantedFile;
+        if (closed || appLoading || next == null || next.getPath().equals(appShown)) return;
+        appLoading = true;
+        decoder.execute(() -> {
+            Bitmap bitmap = decode(next);
+            root.post(() -> {
+                appLoading = false;
+                if (closed) {
+                    if (bitmap != null) bitmap.recycle();
+                    return;
+                }
+                if (bitmap == null) return;
+                crossFade(bitmap);
+                appShown = next.getPath();
+                // The focus may have moved on while this one decoded.
+                if (wantedFile != null && !wantedFile.getPath().equals(appShown)) loadApp();
+            });
+        });
+    }
+
+    /** Fades the new picture in over the old one, then lets the old one go. */
+    private void crossFade(Bitmap bitmap) {
+        Bitmap old = current;
+        if (old == null) {
+            show(bitmap);
+            return;
+        }
+        current = bitmap;
+        root.setBackground(null);
+        android.graphics.drawable.TransitionDrawable fade = new android.graphics.drawable.TransitionDrawable(
+                new android.graphics.drawable.Drawable[]{
+                        new android.graphics.drawable.BitmapDrawable(root.getResources(), old),
+                        new android.graphics.drawable.BitmapDrawable(root.getResources(), bitmap)});
+        fade.setCrossFadeEnabled(true);
+        image.setImageDrawable(fade);
+        fade.startTransition((int) APP_FADE_MS);
+        image.postDelayed(() -> {
+            if (current == bitmap) image.setImageBitmap(bitmap);
+            if (old != current) old.recycle();
+        }, APP_FADE_MS + 150);
     }
 
     /** The pictures the rotation picks from now: wallpaper_moods' group for the time of day, or the whole collection. */

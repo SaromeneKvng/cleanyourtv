@@ -164,6 +164,18 @@ final class Config {
     final boolean libraryOkOpens;
     /** Icon on a card tinted from that icon, instead of the app's banner (config.xml uniform_tiles). */
     final boolean uniformTiles;
+    /** Home as a vertical list of large names (list_layout); set after construction by load(). */
+    boolean listLayout;
+    /** With listLayout, the app's icon before its name (list_icons); false is text only. */
+    boolean listIcons = true;
+    /** app_wallpapers: the picture in the theme's wallpapers/ folder shown while each package has focus. */
+    Map<String, File> appWallpapers = Collections.emptyMap();
+    /** rive_home: play res/raw/homefx.riv (drifting petals) over the wallpaper. Personal fork, off by default. */
+    boolean riveHome;
+    /** show_search_button: a Search button first in the top bar, opening the TV's search. Personal fork, off by default. */
+    boolean showSearchButton;
+    /** wifi_menu: the Wi-Fi pill opens a glass network list (like Inputs) instead of Wi-Fi settings. Personal fork. */
+    boolean wifiMenu;
     /** Background colour behind everything, #RRGGBB; black unless a theme says otherwise. */
     final int backgroundColor;
     /** Time-of-day backdrop, 0 to 100 (config.xml, sky_intensity); 0 keeps the plain background. */
@@ -717,7 +729,27 @@ final class Config {
         Festival festival = json == null ? Festival.NONE : Festival.parse(festivalName(json),
                 string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""));
 
-        return new Config(dock, fillDock, hidden, libraryApps, libraryExcludedApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
+        // list_layout: one column of large names, so none of the dock and row modes apply. On-TV column choices
+        // (Launcher settings) are overridden too, or the list would turn into a grid of names.
+        boolean listLayout = res.getBoolean(R.bool.list_layout);
+        boolean listIcons = res.getBoolean(R.bool.list_icons);
+        if (json != null) {
+            listLayout = bool(json, "list_layout", listLayout);
+            listIcons = bool(json, "list_icons", listIcons);
+        }
+        if (listLayout) {
+            columns = 1;
+            rowsBelow = 0;
+            dockRow = false;
+            singleRow = false;
+            dockTitle = false;
+            alwaysShowNames = false;
+            uniformTiles = false;
+            ambientGlow = false;
+            appGlow = false;
+        }
+
+        Config built = new Config(dock, fillDock, hidden, libraryApps, libraryExcludedApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputSources, inputUriScheme, Math.max(1, columns),
                 Math.max(0, rowsBelow), animations, advancedEffects, shamsi, greetingName, moduleCards, reducedMotion, bootToLiveTv,
                 openOnStartChoice, dockTitle, dockRow, topMenu, launcherSettingsButton, reorderButton, showNetworkPill, showInputsPill,
@@ -733,6 +765,25 @@ final class Config {
                 dateBelowClock, vpnPill, locale, powerOnHomeAlways, inputsConnectedOnly, inputsCecStateOnly,
                 Math.max(0, Math.min(600, openOnStartNetworkWait)), openOnStartOnWake, iconOnlyVpn, clockFormat, backOpensClock, glowSnap,
                 settingsKeyClearTask);
+        built.listLayout = listLayout;
+        built.listIcons = listIcons;
+        built.riveHome = json != null && bool(json, "rive_home", false);
+        built.showSearchButton = json != null && bool(json, "show_search_button", false);
+        built.wifiMenu = json != null && bool(json, "wifi_menu", false);
+        // app_wallpapers: "package=file.jpg", the file a bare name inside the theme's wallpapers/ folder.
+        if (json != null && dir != null && wallpaperEnabled) {
+            Map<String, File> perApp = new HashMap<>();
+            File folder = new File(dir, "wallpapers");
+            for (Map.Entry<String, String> e : packageMap(stringList(json, "app_wallpapers",
+                    Collections.emptyList())).entrySet()) {
+                String name = e.getValue().trim();
+                if (!name.matches("[A-Za-z0-9_.-]+") || name.contains("..")) continue;
+                File picture = new File(folder, name);
+                if (picture.isFile() && picture.length() > 0) perApp.put(e.getKey(), picture);
+            }
+            built.appWallpapers = perApp;
+        }
+        return built;
     }
 
     /**
